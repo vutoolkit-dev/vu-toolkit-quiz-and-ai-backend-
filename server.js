@@ -79,12 +79,14 @@ function readJson(request) {
 function makeUserPrompt(quiz) {
   const options = Array.isArray(quiz.options)
     ? quiz.options.map((option, index) => {
-      const letter = option && typeof option === "object" && option.letter
-        ? String(option.letter)
-        : String.fromCharCode(65 + index);
-      const text = option && typeof option === "object"
+      const rawText = option && typeof option === "object"
         ? option.text ?? option.value ?? option.content ?? ""
         : option;
+      const labeledText = typeof rawText === "string" ? rawText.match(/^\s*([A-D])\.\s*(.*)$/i) : null;
+      const letter = option && typeof option === "object" && option.letter
+        ? String(option.letter)
+        : labeledText?.[1]?.toUpperCase() || String.fromCharCode(65 + index);
+      const text = labeledText ? labeledText[2] : rawText;
       return `${letter}. ${text}`;
     }).join("\n")
     : "";
@@ -149,24 +151,26 @@ function formatPakistanTimestamp(value) {
 
 function normalizedOptions(options) {
   return Array.isArray(options) ? options.map((option) => {
-    if (option && typeof option === "object") {
-      return normalizedValue(option.text ?? option.value ?? option.content);
-    }
-    return normalizedValue(option);
+    const rawText = option && typeof option === "object"
+      ? option.text ?? option.value ?? option.content
+      : option;
+    return normalizedValue(rawText).replace(/^[a-d]\.\s*/i, "");
   }).filter(Boolean) : [];
 }
 
 function labelOptions(options) {
   if (!Array.isArray(options)) return [];
   return options.map((option, index) => {
-    const text = option && typeof option === "object"
+    const rawText = option && typeof option === "object"
       ? option.text ?? option.value ?? option.content ?? ""
       : option;
-    return {
-      letter: String.fromCharCode(65 + index),
-      text: String(text ?? "").trim(),
-    };
-  }).filter((option) => option.text);
+    const labeledText = typeof rawText === "string" ? rawText.trim().match(/^([A-D])\.\s*(.*)$/i) : null;
+    const letter = option && typeof option === "object" && option.letter
+      ? String(option.letter).trim().toUpperCase()
+      : labeledText?.[1]?.toUpperCase() || String.fromCharCode(65 + index);
+    const text = String(labeledText ? labeledText[2] : rawText ?? "").trim();
+    return text ? `${letter}. ${text}` : "";
+  }).filter(Boolean);
 }
 
 function canMergeQuizRecord(existing, incoming) {
