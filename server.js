@@ -203,16 +203,6 @@ function quizMatchScore(existing, incoming) {
   return score;
 }
 
-function mergeQuizTags(existingTags, incomingTags, date, quizNo) {
-  const miscTags = [...(Array.isArray(existingTags) ? existingTags : []), ...(Array.isArray(incomingTags) ? incomingTags : [])]
-    .filter((tag) => tag && tag.type !== "date" && tag.type !== "quiz_no");
-  const unique = new Map(miscTags.map((tag) => [JSON.stringify(tag), tag]));
-  const tags = [...unique.values()];
-  if (date) tags.push({ type: "date", value: String(date) });
-  if (quizNo != null && quizNo !== "") tags.push({ type: "quiz_no", value: String(quizNo) });
-  return tags;
-}
-
 async function supabaseRequest(url, options = {}) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw Object.assign(new Error("Supabase is not configured on the server."), { status: 503 });
@@ -257,9 +247,6 @@ async function saveQuizRecord(quiz) {
       course: row.course,
       date: formatQuizDate(row.date),
       quizNo: row.quiz_no,
-      tags: Array.isArray(row.tags) ? row.tags.map((tag) => tag?.type === "date"
-        ? { ...tag, value: formatQuizDate(tag.value) }
-        : tag) : [],
       createdAt: formatPakistanTimestamp(row.created_at),
       updatedAt: formatPakistanTimestamp(row.updated_at),
     }));
@@ -298,7 +285,6 @@ async function saveQuizRecord(quiz) {
       // Store the latest observed quiz date, but never use it for matching.
       date: chooseValue(formatQuizDate(quiz.date), previous?.date),
       quizNo: chooseValue(quiz.quizNo, previous?.quizNo),
-      tags: mergeQuizTags(previous?.tags, quiz.tags, chooseValue(formatQuizDate(quiz.date), previous?.date), chooseValue(quiz.quizNo, previous?.quizNo)),
       createdAt: previous?.createdAt || now,
       updatedAt: now,
     };
@@ -308,8 +294,8 @@ async function saveQuizRecord(quiz) {
       ? getQuizRecordId(record)
       : crypto.randomUUID());
 
-    const contentFields = ({ question, options, course, date, quizNo, tags }) =>
-      JSON.stringify({ question, options, course, date, quizNo, tags });
+    const contentFields = ({ question, options, course, date, quizNo }) =>
+      JSON.stringify({ question, options, course, date, quizNo });
     const isUnchanged = previous && contentFields(previous) === contentFields(record);
     if (isUnchanged) {
       return { id: previous.id, saved: true, updated: false };
@@ -328,7 +314,6 @@ async function saveQuizRecord(quiz) {
         course: record.course,
         date: record.date,
         quiz_no: record.quizNo,
-        tags: record.tags,
         created_at: record.createdAt,
         updated_at: record.updatedAt,
       }),
