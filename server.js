@@ -144,11 +144,6 @@ async function requestAI(quiz, requestId) {
 
   const messages = [
     {
-      role: "system",
-      content:
-        "You are an expert exam solver for university multiple-choice questions. Analyze the question and any images carefully. State the single best answer clearly. Always start your response with 'The correct option is [Letter]: [Option text]'. Then provide a brief 1-2 sentence explanation.",
-    },
-    {
       role: "user",
       content: userContent,
     },
@@ -189,7 +184,7 @@ async function requestAI(quiz, requestId) {
     questionChars: quiz.question.length,
     optionCount: Array.isArray(quiz.options) ? quiz.options.length : 0,
     reasoning: "none",
-    systemPromptIncluded: true,
+    systemPromptIncluded: false,
     maxTokensFieldIncluded: false,
     streaming: false,
   });
@@ -211,11 +206,6 @@ async function requestAI(quiz, requestId) {
     choiceCount: Array.isArray(body?.choices) ? body.choices.length : 0,
     finishReason: body?.choices?.[0]?.finish_reason || null,
     usage: body?.usage || null,
-    reasoningTokensReported: body?.usage?.completion_tokens_details?.reasoning_tokens
-      ?? body?.usage?.output_tokens_details?.reasoning_tokens
-      ?? body?.usage?.reasoning_tokens
-      ?? null,
-    reasoningContentFieldPresent: Object.hasOwn(body?.choices?.[0]?.message || {}, "reasoning_content"),
   });
   if (!response.ok) {
     const detail = String(body?.error?.message || body?.message || "").slice(0, 500);
