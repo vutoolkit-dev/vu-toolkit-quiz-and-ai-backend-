@@ -1,7 +1,7 @@
 "use strict";
 
 // Adapter for the tested Vercel AI Gateway Messages API.
-async function generate({ apiKey, baseUrl, model, userPrompt }) {
+async function generate({ apiKey, baseUrl, model, userPrompt, images = [] }) {
   if (!apiKey) throw Object.assign(new Error("AI_API_KEY is not configured on the server."), { status: 503 });
 
   const configuredMaxTokens = Number(process.env.AI_MAX_TOKENS || 8192);
@@ -9,6 +9,16 @@ async function generate({ apiKey, baseUrl, model, userPrompt }) {
     ? configuredMaxTokens
     : 8192;
   const endpoint = `${baseUrl.replace(/\/+$/, "")}/messages`;
+  const content = [{ type: "text", text: userPrompt }];
+  images.forEach((image, index) => {
+    const label = image.label || (index === 0 ? "Question" : `Option ${String.fromCharCode(64 + index)}`);
+    content.push({ type: "text", text: `${label}:` });
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: image.mediaType, data: image.data },
+    });
+  });
+
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
@@ -19,7 +29,7 @@ async function generate({ apiKey, baseUrl, model, userPrompt }) {
       model,
       max_tokens: maxTokens,
       thinking: { type: "disabled" },
-      messages: [{ role: "user", content: userPrompt }],
+      messages: [{ role: "user", content }],
     }),
     signal: AbortSignal.timeout(60_000),
   });
