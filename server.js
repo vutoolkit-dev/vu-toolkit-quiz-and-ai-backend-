@@ -1,7 +1,6 @@
 "use strict";
 
-// VU quiz AI API. The browser extension always calls this endpoint; choose or
-// replace the AI provider here using environment variables without changing it.
+// VU quiz storage and AI API.
 const http = require("node:http");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -24,9 +23,6 @@ function loadEnvFile() {
 loadEnvFile();
 
 const PORT = Number(process.env.PORT || 3000);
-const AI_PROVIDER_MODULE = process.env.AI_PROVIDER_MODULE || "./providers/ai-gateway.js";
-const AI_PROVIDER_PATH = path.resolve(__dirname, AI_PROVIDER_MODULE);
-const aiProvider = require(AI_PROVIDER_PATH);
 const AI_BASE_URL = (process.env.AI_BASE_URL || "https://ai-gateway.vercel.sh/v1").replace(/\/+$/, "");
 const AI_MODEL = process.env.AI_MODEL || "deepseek/deepseek-v4.1-flash-1017";
 const AI_API_KEY = process.env.AI_API_KEY || "";
@@ -38,13 +34,18 @@ const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 8 * 1024 * 1024;
 let quizSaveQueue = Promise.resolve();
 
+function backendLog(requestId, stage, details = {}) {
+  console.info(`[request:${requestId}] ${stage}`, details);
+}
+
 function sendJson(response, status, body) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Request-ID",
+    "Access-Control-Expose-Headers": "X-Request-ID",
   });
   response.end(JSON.stringify(body));
 }
@@ -74,25 +75,10 @@ function readJson(request) {
   });
 }
 
-function removeImageReferences(value) {
-  return String(value ?? "").replace(/!\[image\]\((?:data:image\/[^)]+|[^)]+)\)/gi, "[image]");
-}
-
-function fingerprintImageReferences(value) {
-  return String(value ?? "").replace(/!\[image\]\(([^)]+)\)/gi, (_match, source) => {
-    const fingerprint = crypto.createHash("sha256").update(source).digest("hex").slice(0, 16);
-    return `[image:${fingerprint}]`;
-  });
-}
-
 function normalizeAIImages(images) {
   if (images == null) return [];
-  if (!Array.isArray(images)) {
-    throw Object.assign(new Error("Images must be provided as an array."), { status: 400 });
-  }
-  if (images.length > MAX_QUIZ_IMAGES) {
-    throw Object.assign(new Error(`A maximum of ${MAX_QUIZ_IMAGES} images can be sent.`), { status: 413 });
-  }
+  if (!Array.isArray(images)) throw Object.assign(new Error("Images must be provided as an array."), { status: 400 });
+  if (images.length > MAX_QUIZ_IMAGES) throw Object.assign(new Error(`A maximum of ${MAX_QUIZ_IMAGES} images can be sent.`), { status: 413 });
 
   let totalBytes = 0;
   return images.map((image) => {
@@ -100,27 +86,18 @@ function normalizeAIImages(images) {
     if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mediaType)) {
       throw Object.assign(new Error("Images must be PNG, JPEG, GIF, or WebP."), { status: 400 });
     }
-
     const data = typeof image?.data === "string" ? image.data.replace(/\s/g, "") : "";
     if (!data || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
       throw Object.assign(new Error("An image contains invalid base64 data."), { status: 400 });
     }
     const bytes = Buffer.from(data, "base64");
-    const canonicalBase64 = bytes.toString("base64").replace(/=+$/, "");
-    if (!bytes.length || canonicalBase64 !== data.replace(/=+$/, "")) {
+    if (!bytes.length || bytes.toString("base64").replace(/=+$/, "") !== data.replace(/=+$/, "")) {
       throw Object.assign(new Error("An image contains invalid base64 data."), { status: 400 });
     }
-    if (bytes.length > MAX_IMAGE_BYTES) {
-      throw Object.assign(new Error("Each image must be 3 MB or smaller."), { status: 413 });
-    }
-
+    if (bytes.length > MAX_IMAGE_BYTES) throw Object.assign(new Error("Each image must be 3 MB or smaller."), { status: 413 });
     totalBytes += bytes.length;
-    if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
-      throw Object.assign(new Error("Combined quiz images must be 8 MB or smaller."), { status: 413 });
-    }
-    const label = typeof image.label === "string" && /^(Question|Option [A-D])$/.test(image.label)
-      ? image.label
-      : "";
+    if (totalBytes > MAX_TOTAL_IMAGE_BYTES) throw Object.assign(new Error("Combined quiz images must be 8 MB or smaller."), { status: 413 });
+    const label = typeof image.label === "string" && /^(Question|Option [A-D])$/.test(image.label) ? image.label : "";
     return { mediaType, data, label };
   });
 }
@@ -128,24 +105,76 @@ function normalizeAIImages(images) {
 function makeUserPrompt(quiz) {
   const options = Array.isArray(quiz.options)
     ? quiz.options.map((option, index) => {
-      const rawText = removeImageReferences(option && typeof option === "object"
-        ? option.text ?? option.value ?? option.content ?? ""
-        : option);
-      const labeledText = typeof rawText === "string" ? rawText.match(/^\s*([A-D])\.\s*(.*)$/i) : null;
-      const letter = option && typeof option === "object" && option.letter
-        ? String(option.letter)
-        : labeledText?.[1]?.toUpperCase() || String.fromCharCode(65 + index);
-      const text = labeledText ? labeledText[2] : rawText;
-      return `${letter}. ${text}`;
+      const value = option && typeof option === "object" ? option.text ?? option.value ?? option.content ?? "" : option;
+      const labeled = typeof value === "string" ? value.match(/^\s*([A-D])\.\s*(.*)$/i) : null;
+      const letter = labeled?.[1]?.toUpperCase() || String.fromCharCode(65 + index);
+      return `${letter}. ${labeled ? labeled[2] : String(value ?? "")}`;
     }).join("\n")
     : "";
   return [
     quiz.course ? `Course: ${quiz.course}` : "",
     quiz.quizNo != null ? `Quiz: ${quiz.quizNo}` : "",
     quiz.date ? `Date: ${quiz.date}` : "",
-    `Question: ${removeImageReferences(quiz.question).trim()}`,
+    `Question: ${String(quiz.question || "").trim()}`,
     options ? `Options:\n${options}` : "",
   ].filter(Boolean).join("\n\n");
+}
+
+async function requestAI(quiz, requestId) {
+  if (!AI_API_KEY) throw Object.assign(new Error("AI_API_KEY is not configured on the server."), { status: 503 });
+  const userPrompt = makeUserPrompt(quiz);
+  const content = quiz.images.length ? [{ type: "text", text: userPrompt }] : userPrompt;
+  quiz.images.forEach((image) => {
+    if (image.label) content.push({ type: "text", text: `${image.label}:` });
+    content.push({
+      type: "image_url",
+      image_url: { url: `data:${image.mediaType};base64,${image.data}`, detail: "auto" },
+    });
+  });
+
+  const startedAt = Date.now();
+  backendLog(requestId, "AI provider request started", {
+    model: AI_MODEL,
+    messageContentShape: quiz.images.length ? "text-and-image-url-parts" : "text-string",
+    imageCount: quiz.images.length,
+    imageBytes: quiz.images.reduce((sum, image) => sum + Buffer.from(image.data, "base64").length, 0),
+    questionChars: quiz.question.length,
+    optionCount: Array.isArray(quiz.options) ? quiz.options.length : 0,
+  });
+
+  const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${AI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: AI_MODEL,
+      messages: [{ role: "user", content }],
+      reasoning: { effort: "none" },
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const responseText = await response.text();
+  let body = {};
+  try { body = JSON.parse(responseText); } catch {}
+  backendLog(requestId, "AI provider response received", {
+    status: response.status,
+    ok: response.ok,
+    durationMs: Date.now() - startedAt,
+    topLevelKeys: Object.keys(body || {}),
+    choiceCount: Array.isArray(body?.choices) ? body.choices.length : 0,
+  });
+  if (!response.ok) {
+    const detail = String(body?.error?.message || body?.message || "").slice(0, 500);
+    throw Object.assign(new Error(`AI provider request failed (${response.status})${detail ? `: ${detail}` : "."}`), { status: 502 });
+  }
+  const messageContent = body?.choices?.[0]?.message?.content;
+  const answer = typeof messageContent === "string"
+    ? messageContent.trim()
+    : Array.isArray(messageContent)
+      ? messageContent.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim()
+      : "";
+  if (!answer) throw Object.assign(new Error("AI provider returned no answer text."), { status: 502 });
+  return answer;
 }
 
 function getQuizRecordId(quiz) {
@@ -279,15 +308,6 @@ async function supabaseRequest(url, options = {}) {
 }
 
 async function saveQuizRecord(quiz) {
-  quiz = {
-    ...quiz,
-    question: fingerprintImageReferences(quiz.question),
-    options: Array.isArray(quiz.options)
-      ? quiz.options.map((option) => typeof option === "string"
-        ? fingerprintImageReferences(option)
-        : option)
-      : quiz.options,
-  };
   const operation = quizSaveQueue.then(async () => {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       throw Object.assign(new Error("Supabase is not configured on the server."), { status: 503 });
@@ -383,48 +403,18 @@ async function saveQuizRecord(quiz) {
   return operation;
 }
 
-async function solveQuiz(quiz) {
-  if (typeof aiProvider.generate !== "function") {
-    throw Object.assign(new Error("Selected provider module must export generate()."), { status: 500 });
-  }
-
-  const result = await aiProvider.generate({
-    apiKey: AI_API_KEY,
-    baseUrl: AI_BASE_URL,
-    model: AI_MODEL,
-    userPrompt: makeUserPrompt(quiz),
-    images: quiz.images,
-    quiz,
-  });
-
-  // Normalize provider output. Every adapter may return plain text or a common
-  // answer field; the extension always receives the stable `{ answer }` shape.
-  const extractAnswer = (value, depth = 0) => {
-    if (typeof value === "string") return value;
-    if (!value || typeof value !== "object" || depth > 5) return null;
-    for (const key of ["answer", "response", "result", "content", "text", "output", "message", "data"]) {
-      if (value[key] != null) {
-        const candidate = extractAnswer(value[key], depth + 1);
-        if (candidate) return candidate;
-      }
-    }
-    return null;
-  };
-  const answer = extractAnswer(result);
-  if (typeof answer !== "string" || !answer.trim()) {
-    throw Object.assign(new Error("AI provider returned no answer text."), { status: 502 });
-  }
-  return answer.trim();
-}
-
 const server = http.createServer(async (request, response) => {
+  const requestedId = String(request.headers["x-request-id"] || "");
+  const requestId = /^[A-Za-z0-9_-]{1,80}$/.test(requestedId) ? requestedId : crypto.randomUUID();
+  response.setHeader("X-Request-ID", requestId);
   const pathname = new URL(request.url, `http://${request.headers.host || "localhost"}`).pathname;
 
   if (request.method === "OPTIONS") {
     response.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Request-ID",
+      "Access-Control-Expose-Headers": "X-Request-ID",
       "Access-Control-Max-Age": "86400",
     });
     response.end();
@@ -436,14 +426,17 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if ((pathname !== "/api/ai" && pathname !== "/api/quiz") || request.method !== "POST") {
+  if ((pathname !== "/api/quiz" && pathname !== "/api/ai") || request.method !== "POST") {
     sendJson(response, 404, { error: "Not found." });
     return;
   }
 
+  const requestStartedAt = Date.now();
+  backendLog(requestId, "Request received", { method: request.method, path: pathname, contentLength: Number(request.headers["content-length"] || 0) });
   try {
     const quiz = await readJson(request);
     if (!quiz || typeof quiz !== "object" || Array.isArray(quiz) || typeof quiz.question !== "string" || !quiz.question.trim()) {
+      backendLog(requestId, "Request validation failed", { reason: "missing question" });
       sendJson(response, 400, { error: "A non-empty question is required." });
       return;
     }
@@ -451,21 +444,27 @@ const server = http.createServer(async (request, response) => {
     if (pathname === "/api/quiz") {
       const result = await saveQuizRecord(quiz);
       sendJson(response, 200, result);
+      backendLog(requestId, "Quiz save completed", { status: 200, durationMs: Date.now() - requestStartedAt });
       return;
     }
 
     quiz.images = normalizeAIImages(quiz.images);
-    const answer = await solveQuiz(quiz);
-    // Stable response contract consumed by the extension. Prompt/model/output
-    // can all be changed server-side while keeping this `{ answer }` response.
+    const answer = await requestAI(quiz, requestId);
     sendJson(response, 200, { answer });
+    backendLog(requestId, "AI request completed", { status: 200, answerChars: answer.length, durationMs: Date.now() - requestStartedAt });
   } catch (error) {
+    backendLog(requestId, "Request failed", {
+      status: error.status || 500,
+      name: error.name || "Error",
+      message: error.message || "Request failed.",
+      durationMs: Date.now() - requestStartedAt,
+    });
     if (!response.headersSent) {
-      sendJson(response, error.status || 500, { error: error.message || "AI request failed." });
+      sendJson(response, error.status || 500, { error: error.message || "Request failed." });
     }
   }
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`VU Quiz AI API listening on port ${PORT}`);
+  console.log(`VU Quiz API listening on port ${PORT}`);
 });
