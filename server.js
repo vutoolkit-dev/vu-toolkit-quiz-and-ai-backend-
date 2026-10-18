@@ -32,12 +32,10 @@ const AI_MODEL = process.env.AI_MODEL || "deepseek/deepseek-v4.1-flash-1017";
 const AI_API_KEY = process.env.AI_API_KEY || "";
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT || [
-    "Answer the provided multiple-choice quiz question accurately.",
-    "Do not show reasoning or thinking; give only a concise answer.",
-  "End with exactly: The correct option is X. Replace X with the option letter.",
-].join(" ");
-const MAX_BODY_BYTES = 128 * 1024;
+const MAX_BODY_BYTES = 12 * 1024 * 1024;
+const MAX_QUIZ_IMAGES = 8;
+const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES = 8 * 1024 * 1024;
 let quizSaveQueue = Promise.resolve();
 
 function sendJson(response, status, body) {
@@ -76,12 +74,63 @@ function readJson(request) {
   });
 }
 
+function removeImageReferences(value) {
+  return String(value ?? "").replace(/!\[image\]\((?:data:image\/[^)]+|[^)]+)\)/gi, "[image]");
+}
+
+function fingerprintImageReferences(value) {
+  return String(value ?? "").replace(/!\[image\]\(([^)]+)\)/gi, (_match, source) => {
+    const fingerprint = crypto.createHash("sha256").update(source).digest("hex").slice(0, 16);
+    return `[image:${fingerprint}]`;
+  });
+}
+
+function normalizeAIImages(images) {
+  if (images == null) return [];
+  if (!Array.isArray(images)) {
+    throw Object.assign(new Error("Images must be provided as an array."), { status: 400 });
+  }
+  if (images.length > MAX_QUIZ_IMAGES) {
+    throw Object.assign(new Error(`A maximum of ${MAX_QUIZ_IMAGES} images can be sent.`), { status: 413 });
+  }
+
+  let totalBytes = 0;
+  return images.map((image) => {
+    const mediaType = String(image?.mediaType || "").toLowerCase();
+    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mediaType)) {
+      throw Object.assign(new Error("Images must be PNG, JPEG, GIF, or WebP."), { status: 400 });
+    }
+
+    const data = typeof image?.data === "string" ? image.data.replace(/\s/g, "") : "";
+    if (!data || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
+      throw Object.assign(new Error("An image contains invalid base64 data."), { status: 400 });
+    }
+    const bytes = Buffer.from(data, "base64");
+    const canonicalBase64 = bytes.toString("base64").replace(/=+$/, "");
+    if (!bytes.length || canonicalBase64 !== data.replace(/=+$/, "")) {
+      throw Object.assign(new Error("An image contains invalid base64 data."), { status: 400 });
+    }
+    if (bytes.length > MAX_IMAGE_BYTES) {
+      throw Object.assign(new Error("Each image must be 3 MB or smaller."), { status: 413 });
+    }
+
+    totalBytes += bytes.length;
+    if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
+      throw Object.assign(new Error("Combined quiz images must be 8 MB or smaller."), { status: 413 });
+    }
+    const label = typeof image.label === "string" && /^(Question|Option [A-D])$/.test(image.label)
+      ? image.label
+      : "";
+    return { mediaType, data, label };
+  });
+}
+
 function makeUserPrompt(quiz) {
   const options = Array.isArray(quiz.options)
     ? quiz.options.map((option, index) => {
-      const rawText = option && typeof option === "object"
+      const rawText = removeImageReferences(option && typeof option === "object"
         ? option.text ?? option.value ?? option.content ?? ""
-        : option;
+        : option);
       const labeledText = typeof rawText === "string" ? rawText.match(/^\s*([A-D])\.\s*(.*)$/i) : null;
       const letter = option && typeof option === "object" && option.letter
         ? String(option.letter)
@@ -94,7 +143,7 @@ function makeUserPrompt(quiz) {
     quiz.course ? `Course: ${quiz.course}` : "",
     quiz.quizNo != null ? `Quiz: ${quiz.quizNo}` : "",
     quiz.date ? `Date: ${quiz.date}` : "",
-    `Question: ${quiz.question.trim()}`,
+    `Question: ${removeImageReferences(quiz.question).trim()}`,
     options ? `Options:\n${options}` : "",
   ].filter(Boolean).join("\n\n");
 }
@@ -230,6 +279,15 @@ async function supabaseRequest(url, options = {}) {
 }
 
 async function saveQuizRecord(quiz) {
+  quiz = {
+    ...quiz,
+    question: fingerprintImageReferences(quiz.question),
+    options: Array.isArray(quiz.options)
+      ? quiz.options.map((option) => typeof option === "string"
+        ? fingerprintImageReferences(option)
+        : option)
+      : quiz.options,
+  };
   const operation = quizSaveQueue.then(async () => {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       throw Object.assign(new Error("Supabase is not configured on the server."), { status: 503 });
@@ -334,8 +392,8 @@ async function solveQuiz(quiz) {
     apiKey: AI_API_KEY,
     baseUrl: AI_BASE_URL,
     model: AI_MODEL,
-    systemPrompt: AI_SYSTEM_PROMPT,
     userPrompt: makeUserPrompt(quiz),
+    images: quiz.images,
     quiz,
   });
 
@@ -396,6 +454,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    quiz.images = normalizeAIImages(quiz.images);
     const answer = await solveQuiz(quiz);
     // Stable response contract consumed by the extension. Prompt/model/output
     // can all be changed server-side while keeping this `{ answer }` response.
