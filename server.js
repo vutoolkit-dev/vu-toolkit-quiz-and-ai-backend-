@@ -26,6 +26,7 @@ const PORT = Number(process.env.PORT || 3000);
 const AI_BASE_URL = (process.env.AI_BASE_URL || "https://ai-gateway.vercel.sh/v1").replace(/\/+$/, "");
 const AI_MODEL = process.env.AI_MODEL || "deepseek/deepseek-v4.1-flash-1017";
 const AI_API_KEY = process.env.AI_API_KEY || "";
+const AI_PROVIDER = process.env.AI_PROVIDER || "deepinfra";
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const MAX_BODY_BYTES = 12 * 1024 * 1024;
@@ -128,21 +129,53 @@ function makeUserPrompt(quiz) {
 async function requestAI(quiz, requestId) {
   if (!AI_API_KEY) throw Object.assign(new Error("AI_API_KEY is not configured on the server."), { status: 503 });
   const userPrompt = makeUserPrompt(quiz);
-  const content = quiz.images.length ? [{ type: "text", text: userPrompt }] : userPrompt;
-  quiz.images.forEach((image) => {
-    if (image.label) content.push({ type: "text", text: `${image.label}:` });
-    content.push({
-      type: "image_url",
-      image_url: { url: `data:${image.mediaType};base64,${image.data}`, detail: "auto" },
-    });
-  });
+
+  const userContent = quiz.images && quiz.images.length
+    ? [
+        { type: "text", text: userPrompt },
+        ...quiz.images.map((image) => ({
+          type: "image_url",
+          image_url: {
+            url: `data:${image.mediaType};base64,${image.data}`,
+          },
+        })),
+      ]
+    : userPrompt;
+
+  const messages = [
+    {
+      role: "system",
+      content:
+        "You are an expert exam solver for university multiple-choice questions. Analyze the question and any images carefully. State the single best answer clearly. Always start your response with 'The correct option is [Letter]: [Option text]'. Then provide a brief 1-2 sentence explanation.",
+    },
+    {
+      role: "user",
+      content: userContent,
+    },
+  ];
+
+  const requestBody = {
+    model: AI_MODEL,
+    messages,
+    reasoning: { effort: "none" },
+    stream: false,
+  };
+
+  if (AI_PROVIDER) {
+    requestBody.providerOptions = {
+      gateway: {
+        only: [AI_PROVIDER],
+      },
+    };
+  }
 
   const startedAt = Date.now();
   backendLog(requestId, "AI provider request started", {
     model: AI_MODEL,
+    provider: AI_PROVIDER || "gateway-default",
     providerEndpoint: `${AI_BASE_URL}/chat/completions`,
     method: "POST",
-    messageContentShape: quiz.images.length ? "text-and-image-url-parts" : "text-string",
+    messageContentShape: Array.isArray(userContent) ? "text-and-image-url-parts" : "text-string",
     textPromptPreview: logPreview(userPrompt),
     imageParts: quiz.images.map((image) => ({
       label: image.label || null,
@@ -156,7 +189,7 @@ async function requestAI(quiz, requestId) {
     questionChars: quiz.question.length,
     optionCount: Array.isArray(quiz.options) ? quiz.options.length : 0,
     reasoning: "none",
-    systemPromptIncluded: false,
+    systemPromptIncluded: true,
     maxTokensFieldIncluded: false,
     streaming: false,
   });
@@ -164,12 +197,7 @@ async function requestAI(quiz, requestId) {
   const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${AI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: AI_MODEL,
-      messages: [{ role: "user", content }],
-      reasoning: { effort: "none" },
-      stream: false,
-    }),
+    body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(60_000),
   });
   const responseText = await response.text();
@@ -204,12 +232,18 @@ async function requestAI(quiz, requestId) {
   return answer;
 }
 
+function getQuestionKey(question) {
+  const textWithoutImages = String(question || "").replace(/!\[image\]\([^)]+\)/gi, " [image] ").trim();
+  return normalizedValue(textWithoutImages).slice(0, 255);
+}
+
 function getQuizRecordId(quiz) {
   const options = normalizedOptions(quiz.options);
+  const cleanQuestion = String(quiz.question || "").replace(/!\[image\]\([^)]+\)/gi, " [image] ").trim();
   const normalized = [
     String(quiz.course || "").trim().toLowerCase(),
     String(quiz.quizNo || "").trim().toLowerCase(),
-    String(quiz.question || "").trim().replace(/\s+/g, " ").toLowerCase(),
+    normalizedValue(cleanQuestion),
     ...options,
   ];
   return crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
@@ -339,7 +373,7 @@ async function saveQuizRecord(quiz) {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       throw Object.assign(new Error("Supabase is not configured on the server."), { status: 503 });
     }
-    const questionKey = normalizedValue(quiz.question);
+    const questionKey = getQuestionKey(quiz.question);
     const queryUrl = new URL(`${SUPABASE_URL}/rest/v1/quiz_questions`);
     queryUrl.searchParams.set("select", "*");
     queryUrl.searchParams.set("question_key", `eq.${questionKey}`);
