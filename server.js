@@ -38,6 +38,11 @@ function backendLog(requestId, stage, details = {}) {
   console.info(`[request:${requestId}] ${stage}`, details);
 }
 
+function logPreview(value, maxChars = 400) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+
 function sendJson(response, status, body) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -135,11 +140,25 @@ async function requestAI(quiz, requestId) {
   const startedAt = Date.now();
   backendLog(requestId, "AI provider request started", {
     model: AI_MODEL,
+    providerEndpoint: `${AI_BASE_URL}/chat/completions`,
+    method: "POST",
     messageContentShape: quiz.images.length ? "text-and-image-url-parts" : "text-string",
+    textPromptPreview: logPreview(userPrompt),
+    imageParts: quiz.images.map((image) => ({
+      label: image.label || null,
+      mediaType: image.mediaType,
+      bytes: Buffer.from(image.data, "base64").length,
+      gatewayPartType: "image_url",
+      encoding: "data URL with base64 payload",
+    })),
     imageCount: quiz.images.length,
     imageBytes: quiz.images.reduce((sum, image) => sum + Buffer.from(image.data, "base64").length, 0),
     questionChars: quiz.question.length,
     optionCount: Array.isArray(quiz.options) ? quiz.options.length : 0,
+    reasoning: "none",
+    systemPromptIncluded: false,
+    maxTokensFieldIncluded: false,
+    streaming: false,
   });
 
   const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
@@ -162,6 +181,13 @@ async function requestAI(quiz, requestId) {
     durationMs: Date.now() - startedAt,
     topLevelKeys: Object.keys(body || {}),
     choiceCount: Array.isArray(body?.choices) ? body.choices.length : 0,
+    finishReason: body?.choices?.[0]?.finish_reason || null,
+    usage: body?.usage || null,
+    reasoningTokensReported: body?.usage?.completion_tokens_details?.reasoning_tokens
+      ?? body?.usage?.output_tokens_details?.reasoning_tokens
+      ?? body?.usage?.reasoning_tokens
+      ?? null,
+    reasoningContentFieldPresent: Object.hasOwn(body?.choices?.[0]?.message || {}, "reasoning_content"),
   });
   if (!response.ok) {
     const detail = String(body?.error?.message || body?.message || "").slice(0, 500);
@@ -174,6 +200,7 @@ async function requestAI(quiz, requestId) {
       ? messageContent.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim()
       : "";
   if (!answer) throw Object.assign(new Error("AI provider returned no answer text."), { status: 502 });
+  backendLog(requestId, "AI answer parsed", { answerChars: answer.length, answerPreview: logPreview(answer) });
   return answer;
 }
 
@@ -449,6 +476,22 @@ const server = http.createServer(async (request, response) => {
     }
 
     quiz.images = normalizeAIImages(quiz.images);
+    backendLog(requestId, "AI request payload validated", {
+      questionChars: quiz.question.length,
+      questionPreview: logPreview(quiz.question),
+      optionCount: Array.isArray(quiz.options) ? quiz.options.length : 0,
+      options: Array.isArray(quiz.options) ? quiz.options.map((option, index) => ({
+        letter: String.fromCharCode(65 + index),
+        preview: logPreview(option && typeof option === "object" ? option.text ?? option.value ?? option.content ?? "" : option, 160),
+      })) : [],
+      imageCount: quiz.images.length,
+      imageLabels: quiz.images.map(({ label, mediaType, data }) => ({
+        label: label || null,
+        mediaType,
+        bytes: Buffer.from(data, "base64").length,
+      })),
+      metadata: { course: quiz.course || null, quizNo: quiz.quizNo ?? null, date: quiz.date || null },
+    });
     const answer = await requestAI(quiz, requestId);
     sendJson(response, 200, { answer });
     backendLog(requestId, "AI request completed", { status: 200, answerChars: answer.length, durationMs: Date.now() - requestStartedAt });
