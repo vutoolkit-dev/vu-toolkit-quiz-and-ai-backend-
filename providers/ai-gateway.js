@@ -1,7 +1,7 @@
 "use strict";
 
 // Adapter for the tested Vercel AI Gateway Messages API.
-async function generate({ apiKey, baseUrl, model, systemPrompt, userPrompt }) {
+async function generate({ apiKey, baseUrl, model, userPrompt }) {
   if (!apiKey) throw Object.assign(new Error("AI_API_KEY is not configured on the server."), { status: 503 });
 
   const configuredMaxTokens = Number(process.env.AI_MAX_TOKENS || 8192);
@@ -19,7 +19,6 @@ async function generate({ apiKey, baseUrl, model, systemPrompt, userPrompt }) {
       model,
       max_tokens: maxTokens,
       thinking: { type: "disabled" },
-      system: systemPrompt,
       messages: [{ role: "user", content: userPrompt }],
     }),
     signal: AbortSignal.timeout(60_000),
