@@ -3,6 +3,10 @@
 // Default adapter for providers that expose the OpenAI chat-completions shape.
 async function generate({ apiKey, baseUrl, model, systemPrompt, userPrompt }) {
   if (!apiKey) throw Object.assign(new Error("AI_API_KEY is not configured on the server."), { status: 503 });
+  const configuredMaxTokens = Number(process.env.AI_MAX_TOKENS || 8192);
+  const maxTokens = Number.isInteger(configuredMaxTokens) && configuredMaxTokens > 0
+    ? configuredMaxTokens
+    : 8192;
   const endpoint = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
@@ -26,6 +30,7 @@ async function generate({ apiKey, baseUrl, model, systemPrompt, userPrompt }) {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
+      max_tokens: maxTokens,
       temperature: 0.2,
     }),
     signal: AbortSignal.timeout(60_000),
