@@ -24,17 +24,17 @@ function loadEnvFile() {
 loadEnvFile();
 
 const PORT = Number(process.env.PORT || 3000);
-const AI_PROVIDER_MODULE = process.env.AI_PROVIDER_MODULE || "./providers/openai-compatible.js";
+const AI_PROVIDER_MODULE = process.env.AI_PROVIDER_MODULE || "./providers/ai-gateway.js";
 const AI_PROVIDER_PATH = path.resolve(__dirname, AI_PROVIDER_MODULE);
 const aiProvider = require(AI_PROVIDER_PATH);
-const AI_BASE_URL = (process.env.AI_BASE_URL || "https://agentrouter.org/v1").replace(/\/+$/, "");
-const AI_MODEL = process.env.AI_MODEL || "deepseek-v4-flash";
+const AI_BASE_URL = (process.env.AI_BASE_URL || "https://ai-gateway.vercel.sh/v1").replace(/\/+$/, "");
+const AI_MODEL = process.env.AI_MODEL || "deepseek/deepseek-v4.1-flash-1017";
 const AI_API_KEY = process.env.AI_API_KEY || "";
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT || [
-  "Solve the provided multiple-choice quiz question accurately.",
-  "Explain the reasoning briefly and clearly.",
+    "Answer the provided multiple-choice quiz question accurately.",
+    "Do not show reasoning or thinking; give only a concise answer.",
   "End with exactly: The correct option is X. Replace X with the option letter.",
 ].join(" ");
 const MAX_BODY_BYTES = 128 * 1024;
