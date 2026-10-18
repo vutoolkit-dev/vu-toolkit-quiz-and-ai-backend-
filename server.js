@@ -144,6 +144,25 @@ async function requestAI(quiz, requestId) {
 
   const messages = [
     {
+      role: "system",
+      content: [
+        "You are an authoritative, world-class academic professor and exam solver specializing in university multiple-choice questions.",
+        "Your priority is 100% precision and correctness. Every single mark is critical for the student.",
+        "",
+        "Instructions for Accuracy:",
+        "1. Carefully read and analyze the question, all options, and any attached images, formulas, or logic diagrams.",
+        "2. Watch out for tricky wording, negatives ('NOT', 'EXCEPT'), mathematical signs, units, and subtle edge cases.",
+        "3. Verify and solve step-by-step internally before committing to an option.",
+        "4. Match your conclusion directly against the provided options (A, B, C, D).",
+        "",
+        "Output Format Requirement:",
+        "You MUST start the very first line of your response with this exact format:",
+        "The correct option is [Letter]: [Option text]",
+        "",
+        "Follow immediately with a clear, concise 1-2 sentence explanation proving why this option is correct.",
+      ].join("\n"),
+    },
+    {
       role: "user",
       content: userContent,
     },
@@ -184,7 +203,7 @@ async function requestAI(quiz, requestId) {
     questionChars: quiz.question.length,
     optionCount: Array.isArray(quiz.options) ? quiz.options.length : 0,
     reasoning: "none",
-    systemPromptIncluded: false,
+    systemPromptIncluded: true,
     maxTokensFieldIncluded: false,
     streaming: false,
   });
